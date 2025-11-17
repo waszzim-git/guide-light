@@ -54,6 +54,12 @@ jobs:
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
+      - name: Enable corepack and activate pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm --activate
+
+
 
       - name: Setup Node.js and pnpm
         uses: actions/setup-node@v4
