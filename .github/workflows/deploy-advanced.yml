@@ -1,0 +1,161 @@
+name: CI/CD — Build, Push, Deploy (Advanced)
+
+concurrency:
+  group: "deploy-guide-light"
+  cancel-in-progress: true
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+env:
+  REGION: asia-south1
+  ARTIFACT_REPO: guide-light-repo
+  BACKEND_SERVICE: guide-light-backend
+  AGENT_SERVICE: guide-light-agent
+
+jobs:
+  setup:
+    name: Setup auth
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.sha.outputs.sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Get short SHA
+        id: sha
+        run: echo "::set-output name=sha::$(echo ${GITHUB_SHA} | cut -c1-10)"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ secrets.PROJECT_ID }}
+          export_default_credentials: true
+
+  build-and-push:
+    name: Build & Push Images
+    runs-on: ubuntu-latest
+    needs: setup
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Configure Docker to use Artifact Registry
+        run: gcloud auth configure-docker asia-south1-docker.pkg.dev --quiet
+
+      # Backend image build + push (with cache)
+      - name: Build & push backend
+        uses: docker/build-push-action@v4
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            asia-south1-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:${{ steps.sha.outputs.sha }}
+            asia-south1-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:latest
+          cache-from: type=registry,ref=asia-south1-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:latest
+          cache-to: type=inline
+
+      # Agent image build + push
+      - name: Build & push agent
+        uses: docker/build-push-action@v4
+        with:
+          context: ./agent
+          file: ./agent/Dockerfile
+          push: true
+          tags: |
+            asia-south1-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/agent:${{ steps.sha.outputs.sha }}
+            asia-south1-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/agent:latest
+          cache-from: type=registry,ref=asia-south1-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/agent:latest
+          cache-to: type=inline
+
+  deploy:
+    name: Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    steps:
+      - name: Authenticate to Google Cloud (deploy)
+        uses: google-github-actions/auth@v1
+        with:
+          credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+      - name: Setup gcloud CLI
+        uses: google-github-actions/setup-gcloud@v1
+        with:
+          project_id: ${{ secrets.PROJECT_ID }}
+
+      - name: Deploy backend to Cloud Run (with retries)
+        run: |
+          IMAGE=asia-south1-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/backend:${{ needs.setup.outputs.image-tag || github.sha }}
+          for i in 1 2 3; do
+            if gcloud run deploy ${{ env.BACKEND_SERVICE }} \
+              --image "$IMAGE" \
+              --region ${{ env.REGION }} \
+              --platform managed \
+              --allow-unauthenticated \
+              --service-account="run-backend-sa@${{ secrets.PROJECT_ID }}.iam.gserviceaccount.com" \
+              --quiet; then
+              echo "Backend deployed"
+              break
+            fi
+            echo "Retrying deploy ($i)..."
+            sleep 5
+          done
+
+      - name: Deploy agent to Cloud Run (with retries)
+        run: |
+          IMAGE=asia-south1-docker.pkg.dev/${{ secrets.PROJECT_ID }}/${{ env.ARTIFACT_REPO }}/agent:${{ needs.setup.outputs.image-tag || github.sha }}
+          for i in 1 2 3; do
+            if gcloud run deploy ${{ env.AGENT_SERVICE }} \
+              --image "$IMAGE" \
+              --region ${{ env.REGION }} \
+              --platform managed \
+              --allow-unauthenticated \
+              --service-account="run-agent-sa@${{ secrets.PROJECT_ID }}.iam.gserviceaccount.com" \
+              --quiet; then
+              echo "Agent deployed"
+              break
+            fi
+            echo "Retrying deploy ($i)..."
+            sleep 5
+          done
+
+      - name: Wait for services to warm up
+        run: sleep 6
+
+      - name: Get backend URL
+        id: backend-url
+        run: |
+          echo "URL=$(gcloud run services describe ${{ env.BACKEND_SERVICE }} --region=${{ env.REGION }} --format='value(status.url)')" >> $GITHUB_OUTPUT
+
+      - name: Smoke test backend health
+        run: |
+          URL=${{ steps.backend-url.outputs.URL }}
+          echo "Checking $URL/health"
+          for i in 1 2 3; do
+            if curl -sfS "$URL/health" ; then
+              echo "Backend healthy"
+              exit 0
+            fi
+            echo "Waiting for backend ($i)..."
+            sleep 5
+          done
+          echo "Backend failed health check"; exit 1
