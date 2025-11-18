@@ -3,21 +3,19 @@ FROM node:20-slim
 # Set working directory
 WORKDIR /app
 
-# Install system dependencies (keep minimal)
-RUN apt-get update && apt-get install -y \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# Install system dependencies (minimal)
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 
-# Copy package files first for Docker layer caching
-COPY package*.json ./
+# Copy package files (including lockfile) for deterministic install
+COPY package-lock.json package.json ./
 
-# Install only production dependencies using npm
+# Install only production deps using npm ci
 RUN npm ci --omit=dev
 
-# Copy source code
+# Copy app source
 COPY . .
 
-# Expose API port expected by Cloud Run
+# Expose port expected by Cloud Run
 EXPOSE 8080
 
 # Start backend
