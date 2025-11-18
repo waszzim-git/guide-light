@@ -15,8 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy agent source
 COPY . .
 
-# Expose agent port
-EXPOSE 8081
+# Ensure app listens on the port Cloud Run provides (env PORT)
+EXPOSE 8080
 
-# Start agent
-CMD ["python", "main.py"]
+# Start agent with uvicorn, using PORT env var (fallback 8080)
+# Use sh -c so ${PORT} expansion works in the container at runtime
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${PORT:-8080}"]
