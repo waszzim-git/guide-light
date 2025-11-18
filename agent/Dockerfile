@@ -1,6 +1,22 @@
 FROM python:3.11-slim
+
+# Set working directory
 WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy and install Python dependencies
 COPY requirements.txt .
-RUN python -m pip install --no-cache-dir -r requirements.txt || true
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy agent source
 COPY . .
-CMD ["gunicorn", "app.main:app", "--bind", "0.0.0.0:8080", "--worker-class", "uvicorn.workers.UvicornWorker"]
+
+# Expose agent port
+EXPOSE 8081
+
+# Start agent
+CMD ["python", "main.py"]
